@@ -1381,6 +1381,128 @@ uint8_t Adafruit_PN532::ntag2xx_WritePage (uint8_t page, uint8_t * data)
 }
 
 /**************************************************************************/
+/*! 
+    Writes an NDEF Text Record starting at the specified page (4..nn)
+    
+    Note that this function assumes that the NTAG2xx card is
+    already formatted to work as an "NFC Forum Tag".
+
+    @param  language      The text language (e.g. "ch-DE" or "en")
+    @param  text          The text to be written in UTF-8 format
+    @param  dataLen       The size of the data area for overflow checks.
+    
+    @returns 1 if everything executed properly, 0 for an error
+*/
+/**************************************************************************/
+uint8_t Adafruit_PN532::ntag2xx_WriteNDEFText (char * language, char * text, char * language2, char * text2, uint8_t dataLen)
+{
+  uint8_t pageBuffer[4] = { 0, 0, 0, 0 };
+  
+  // Setup length values
+  // Generic values
+  uint8_t topheaderlen = 7;
+  uint8_t ndefheaderlen = 4;
+  // Text 1
+  uint8_t langlen = strlen(language);
+  uint8_t textlen = strlen(text);
+  uint8_t payloadlen = langlen + textlen + 1;
+  // Text 2
+  uint8_t langlen2 = strlen(language2);
+  uint8_t textlen2 = strlen(text2);
+  uint8_t payloadlen2 = langlen2 + textlen2 + 1;
+  // Totals
+  uint8_t recordslen = ndefheaderlen + payloadlen + ndefheaderlen + payloadlen2;
+  uint8_t buffersize = topheaderlen + recordslen + 1; // There is an additional "end of records" byte at the end
+  // Setup the buffer
+  byte bytebuffer[buffersize];
+  
+  // Make sure the URI payload will fit in dataLen (include 0xFE trailer)
+  if ((buffersize < 1) || (buffersize > (dataLen)))
+    return 0;
+
+  // Setup the message header
+  // See NFCForum-TS-Type-2-Tag_1.1.pdf for details
+  /* NDEF Lock Control TLV (must be first and always present) */
+  bytebuffer[0] = 0x01;         /* Tag Field (0x01 = Lock Control TLV) */
+  bytebuffer[1] = 0x03;         /* Payload Length (always 3) */
+  bytebuffer[2] = 0xA0;         /* The position inside the tag of the lock bytes (upper 4 = page address, lower 4 = byte offset) */
+  bytebuffer[3] = 0x0C;         /* Size in bits of the lock area */
+  bytebuffer[4] = 0x34;         /* Size in bytes of a page and the number of bytes each lock bit can lock (4 bit + 4 bits) */
+    /* NDEF Message TLV - URI Record */
+  bytebuffer[5] = 0x03;         /* Tag Field (0x03 = NDEF Message) */
+  bytebuffer[6] = recordslen;   /* Payload Length (not including 0xFE trailer) */
+  
+  // Setup first Text Record header
+  bytebuffer[7]  = 0x91;         /* NDEF Record Header (TNF=0x1:Well known record + SR + MB) */
+  bytebuffer[8]  = 0x01;         /* Type Length for the record type indicator */
+  bytebuffer[9]  = payloadlen;   /* Payload len */
+  bytebuffer[10] = 0x54;         /* Record Type Indicator (0x54 or 'T' = Text Record) */
+  bytebuffer[11] = langlen;      /* Status field, first 3 bits 000, last 5 lang. length */
+  // Copy the language
+  memcpy (bytebuffer+topheaderlen+ndefheaderlen+1, language, langlen);
+
+  // Copy the text
+  memcpy (bytebuffer+topheaderlen+ndefheaderlen+1+langlen, text, textlen);
+  // Start of next tag
+  uint8_t start2 = topheaderlen+ndefheaderlen+payloadlen;
+  // Setup second Text Record header
+  bytebuffer[start2]   = 0x51;         /* NDEF Record Header (TNF=0x1:Well known record + ME + MB) */
+  bytebuffer[start2+1] = 0x01;         /* Type Length for the record type indicator */
+  bytebuffer[start2+2] = payloadlen2;       /* Payload len */
+  bytebuffer[start2+3] = 0x54;         /* Record Type Indicator (0x54 or 'T' = Text Record) */
+  bytebuffer[start2+4] = langlen2;     /* Status field, first 3 bits 000, last 5 lang. length */
+  // Copy the language
+  memcpy (bytebuffer+start2+ndefheaderlen+1, language2, langlen2);
+  // Copy the text
+  memcpy (bytebuffer+start2+ndefheaderlen+1+langlen2, text2, textlen2);
+  
+  // Add the end tag
+  bytebuffer[buffersize-1] = 0xFE;
+
+  // The buffer is now complete, write it to the card
+  uint8_t currentPage = 4; // 4 ist the first user page
+  char * bytebuffercopy = bytebuffer;
+  uint8_t bytestowrite = buffersize;
+  while(bytestowrite)
+  {
+    if (bytestowrite < 4)
+    {
+      memset(pageBuffer, 0, 4);
+      memcpy(pageBuffer, bytebuffercopy, bytestowrite);
+      if (!(ntag2xx_WritePage (currentPage, pageBuffer)))
+        return 0;
+      // DONE!
+      return 1;
+    }
+    else if (bytestowrite == 4)
+    {
+      memcpy(pageBuffer, bytebuffercopy, bytestowrite);
+      if (!(ntag2xx_WritePage (currentPage, pageBuffer)))
+        return 0;
+      memset(pageBuffer, 0, 4);
+      currentPage++;
+      if (!(ntag2xx_WritePage (currentPage, pageBuffer)))
+        return 0;
+      // DONE!
+      return 1;
+    }
+    else
+    {
+      // More than one page of data left
+      memcpy(pageBuffer, bytebuffercopy, 4);
+      if (!(ntag2xx_WritePage (currentPage, pageBuffer)))
+        return 0;
+      currentPage++;
+      bytebuffercopy+=4;
+      bytestowrite-=4;
+    }
+  }
+
+  // Seems that everything was OK (?!)
+  return 1;
+}
+
+/**************************************************************************/
 /*!
     Writes an NDEF URI Record starting at the specified page (4..nn)
 
@@ -1417,8 +1539,8 @@ uint8_t Adafruit_PN532::ntag2xx_WriteNDEFURI (uint8_t uriIdentifier, char * url,
     0x01,         /* Tag Field (0x01 = Lock Control TLV) */
     0x03,         /* Payload Length (always 3) */
     0xA0,         /* The position inside the tag of the lock bytes (upper 4 = page address, lower 4 = byte offset) */
-    0x10,         /* Size in bits of the lock area */
-    0x44,         /* Size in bytes of a page and the number of bytes each lock bit can lock (4 bit + 4 bits) */
+    0x0C,         /* Size in bits of the lock area */
+    0x34,         /* Size in bytes of a page and the number of bytes each lock bit can lock (4 bit + 4 bits) */
     /* NDEF Message TLV - URI Record */
     0x03,         /* Tag Field (0x03 = NDEF Message) */
     len+5,        /* Payload Length (not including 0xFE trailer) */
